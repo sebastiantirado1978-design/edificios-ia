@@ -1,0 +1,251 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model Building {
+  id              String   @id @default(cuid())
+  name            String
+  address         String
+  commune         String
+  city            String   @default("Santiago")
+  totalUnits      Int      @default(0)
+  whatsappPhoneId String?
+  whatsappToken   String?
+  adminPhone      String?
+  adminEmail      String?
+  active          Boolean  @default(true)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  units         Unit[]
+  residents     Resident[]
+  tickets       Ticket[]
+  documents     Document[]
+  announcements Announcement[]
+  surveys       Survey[]
+  assemblies    Assembly[]
+  payments      Payment[]
+  settings      BuildingSettings?
+  conversations Conversation[]
+}
+
+model Unit {
+  id         String   @id @default(cuid())
+  buildingId String
+  building   Building @relation(fields: [buildingId], references: [id])
+  number     String
+  floor      Int?
+  type       String   @default("departamento")
+  area       Float?
+  aliquot    Float    @default(0)
+  active     Boolean  @default(true)
+  createdAt  DateTime @default(now())
+
+  residents Resident[]
+  payments  Payment[]
+  tickets   Ticket[]
+}
+
+model Resident {
+  id           String   @id @default(cuid())
+  buildingId   String
+  building     Building @relation(fields: [buildingId], references: [id])
+  unitId       String?
+  unit         Unit?    @relation(fields: [unitId], references: [id])
+  fullName     String
+  phone        String   @unique
+  email        String?
+  rut          String?
+  role         String   @default("residente")
+  status       String   @default("active")
+  registeredAt DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  conversations   Conversation[]
+  tickets         Ticket[]
+  surveyResponses SurveyResponse[]
+  payments        Payment[]
+}
+
+model Ticket {
+  id           String    @id @default(cuid())
+  buildingId   String
+  building     Building  @relation(fields: [buildingId], references: [id])
+  residentId   String?
+  resident     Resident? @relation(fields: [residentId], references: [id])
+  unitId       String?
+  unit         Unit?     @relation(fields: [unitId], references: [id])
+  ticketNumber String
+  category     String
+  title        String
+  description  String
+  priority     String    @default("media")
+  status       String    @default("abierto")
+  assignedTo   String?
+  resolvedAt   DateTime?
+  notes        String?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  messages TicketMessage[]
+}
+
+model TicketMessage {
+  id        String   @id @default(cuid())
+  ticketId  String
+  ticket    Ticket   @relation(fields: [ticketId], references: [id])
+  sender    String
+  content   String
+  createdAt DateTime @default(now())
+}
+
+model Payment {
+  id         String    @id @default(cuid())
+  buildingId String
+  building   Building  @relation(fields: [buildingId], references: [id])
+  residentId String?
+  resident   Resident? @relation(fields: [residentId], references: [id])
+  unitId     String?
+  unit       Unit?     @relation(fields: [unitId], references: [id])
+  period     String
+  amount     Float
+  paidAmount Float     @default(0)
+  dueDate    DateTime
+  paidAt     DateTime?
+  status     String    @default("pendiente")
+  notes      String?
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+}
+
+model Document {
+  id         String   @id @default(cuid())
+  buildingId String
+  building   Building @relation(fields: [buildingId], references: [id])
+  title      String
+  category   String
+  content    String
+  fileUrl    String?
+  isPublic   Boolean  @default(true)
+  version    String?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+}
+
+model Announcement {
+  id          String    @id @default(cuid())
+  buildingId  String
+  building    Building  @relation(fields: [buildingId], references: [id])
+  title       String
+  content     String
+  targetRoles String    @default("todos")
+  sentViaWA   Boolean   @default(false)
+  sentAt      DateTime?
+  createdAt   DateTime  @default(now())
+}
+
+model Survey {
+  id          String    @id @default(cuid())
+  buildingId  String
+  building    Building  @relation(fields: [buildingId], references: [id])
+  title       String
+  description String?
+  status      String    @default("draft")
+  closesAt    DateTime?
+  createdAt   DateTime  @default(now())
+
+  questions SurveyQuestion[]
+  responses SurveyResponse[]
+}
+
+model SurveyQuestion {
+  id       String @id @default(cuid())
+  surveyId String
+  survey   Survey @relation(fields: [surveyId], references: [id])
+  question String
+  type     String @default("single")
+  options  String @default("[]")
+  order    Int    @default(0)
+
+  answers SurveyResponse[]
+}
+
+model SurveyResponse {
+  id         String         @id @default(cuid())
+  surveyId   String
+  survey     Survey         @relation(fields: [surveyId], references: [id])
+  questionId String
+  question   SurveyQuestion @relation(fields: [questionId], references: [id])
+  residentId String?
+  resident   Resident?      @relation(fields: [residentId], references: [id])
+  answer     String
+  createdAt  DateTime       @default(now())
+}
+
+model Assembly {
+  id          String   @id @default(cuid())
+  buildingId  String
+  building    Building @relation(fields: [buildingId], references: [id])
+  title       String
+  type        String   @default("ordinaria")
+  scheduledAt DateTime
+  location    String?
+  quorum      Float?
+  status      String   @default("programada")
+  agenda      String?
+  minutesUrl  String?
+  notes       String?
+  createdAt   DateTime @default(now())
+}
+
+model Conversation {
+  id              String    @id @default(cuid())
+  buildingId      String
+  building        Building  @relation(fields: [buildingId], references: [id])
+  residentId      String?
+  resident        Resident? @relation(fields: [residentId], references: [id])
+  channel         String    @default("whatsapp")
+  lastMessage     String?
+  intent          String?
+  status          String    @default("open")
+  assignedToHuman Boolean   @default(false)
+  aiEnabled       Boolean   @default(true)
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  messages Message[]
+}
+
+model Message {
+  id             String       @id @default(cuid())
+  conversationId String
+  conversation   Conversation @relation(fields: [conversationId], references: [id])
+  sender         String
+  content        String
+  createdAt      DateTime     @default(now())
+}
+
+model BuildingSettings {
+  id                String   @id @default(cuid())
+  buildingId        String   @unique
+  building          Building @relation(fields: [buildingId], references: [id])
+  welcomeMessage    String   @default("Hola, soy el asistente virtual de tu edificio. ¿En qué te puedo ayudar?")
+  outOfHoursMessage String   @default("Estamos fuera de horario. Te responderemos pronto.")
+  officeHoursStart  String   @default("09:00")
+  officeHoursEnd    String   @default("18:00")
+  emergencyPhone    String?
+  conciergePhone    String?
+  commonAreasInfo   String?
+  parkingRules      String?
+  petPolicy         String?
+  noisePolicy       String?
+  guestPolicy       String?
+  paymentInfo       String?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+}
