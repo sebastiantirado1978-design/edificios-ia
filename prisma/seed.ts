@@ -14,6 +14,7 @@ async function main() {
       totalUnits: 120,
       adminEmail: "admin@bluehome.cl",
       adminPhone: "+56912345001",
+      whatsappPhoneId: "TEST_PHONE_LAS_CONDES",
     },
     {
       name: "Blue Home Providencia",
@@ -22,6 +23,7 @@ async function main() {
       totalUnits: 80,
       adminEmail: "admin@bluehome.cl",
       adminPhone: "+56912345002",
+      whatsappPhoneId: "TEST_PHONE_PROVIDENCIA",
     },
     {
       name: "Blue Home Ñuñoa",
@@ -30,6 +32,7 @@ async function main() {
       totalUnits: 64,
       adminEmail: "admin@bluehome.cl",
       adminPhone: "+56912345003",
+      whatsappPhoneId: "TEST_PHONE_NUNOA",
     },
   ];
 

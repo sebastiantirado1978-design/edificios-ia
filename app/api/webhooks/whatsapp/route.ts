@@ -56,16 +56,18 @@ export async function POST(request: Request) {
         for (const msg of value.messages) {
           if (msg.type !== "text") continue;
           const msgTimestamp = parseInt(msg.timestamp ?? "0") * 1000;
-          if (Date.now() - msgTimestamp > 60000) continue;
+          if (Date.now() - msgTimestamp > 300000) continue;
           const phone = `+${msg.from}`;
           const text = msg.text?.body ?? "";
           const phoneNumberId = value.metadata?.phone_number_id;
-          await processMessage(phone, text, phoneNumberId).catch((e) =>
+          // Fire-and-forget
+          processMessage(phone, text, phoneNumberId).catch((e) =>
             console.error("[Webhook] processMessage error:", e)
           );
         }
       }
     }
+    // Return 200 BEFORE any await
     return NextResponse.json({ status: "ok" });
   } catch (error) {
     console.error("[Webhook] Error:", error);

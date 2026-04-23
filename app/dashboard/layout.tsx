@@ -1,7 +1,7 @@
 "use client";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Building2, Ticket, Users, CreditCard, FileText, Megaphone, ClipboardList, MessageSquare, Settings } from "lucide-react";
+import { Building2, Ticket, Users, CreditCard, FileText, Megaphone, ClipboardList, MessageSquare, Settings, Bot } from "lucide-react";
 
 const navItems = [
   { href: "/dashboard", label: "Dashboard", icon: Building2 },
@@ -12,6 +12,7 @@ const navItems = [
   { href: "/dashboard/announcements", label: "Comunicados", icon: Megaphone },
   { href: "/dashboard/surveys", label: "Encuestas", icon: ClipboardList },
   { href: "/dashboard/conversations", label: "Conversaciones", icon: MessageSquare },
+  { href: "/dashboard/simulator", label: "Simulador IA", icon: Bot },
   { href: "/dashboard/settings", label: "Configuración", icon: Settings },
 ];
 

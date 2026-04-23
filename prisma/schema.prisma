@@ -246,6 +246,10 @@ model BuildingSettings {
   noisePolicy       String?
   guestPolicy       String?
   paymentInfo       String?
+  gastosComunesDueDay Int     @default(5)
+  reglamento          String  @default("")
+  officeHours         String  @default("Lunes a Viernes 09:00-18:00")
+  cancellationPolicy  String  @default("")
   createdAt         DateTime @default(now())
   updatedAt         DateTime @updatedAt
 }
