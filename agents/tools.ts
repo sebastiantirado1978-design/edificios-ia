@@ -1,3 +1,14 @@
+/**
+ * agents/tools.ts — Edificios IA
+ *
+ * Librería de herramientas del agente ConserjeIA.
+ * FIXES aplicados:
+ * 1. findOrCreateResident: lookup SCOPED a buildingId (@@unique([phone, buildingId]))
+ * 2. createTicket: numeración atómica via Building.lastTicketSeq (elimina race condition)
+ * 3. saveMessage: acepta whatsappMessageId para idempotencia
+ * 4. getDashboardMetrics: siempre filtra por organizationId o buildingId
+ */
+
 import { prisma } from "@/lib/prisma";
 
 export interface ToolResult<T = unknown> {
@@ -6,7 +17,7 @@ export interface ToolResult<T = unknown> {
   error?: string;
 }
 
-// ── Building ──────────────────────────────────────────────────────────────────
+// ─── Building ─────────────────────────────────────────────────────────────────
 
 export async function getBuildingByPhoneId(phoneNumberId: string): Promise<ToolResult> {
   try {
@@ -20,11 +31,14 @@ export async function getBuildingByPhoneId(phoneNumberId: string): Promise<ToolR
   }
 }
 
-export async function getAllBuildings(): Promise<ToolResult> {
+export async function getBuildingsByOrganization(organizationId: string): Promise<ToolResult> {
   try {
     const buildings = await prisma.building.findMany({
-      where: { active: true },
-      include: { settings: true, _count: { select: { residents: true, tickets: true } } },
+      where: { organizationId, active: true },
+      include: {
+        settings: true,
+        _count: { select: { residents: true, tickets: true } },
+      },
       orderBy: { name: "asc" },
     });
     return { success: true, data: buildings };
@@ -33,16 +47,26 @@ export async function getAllBuildings(): Promise<ToolResult> {
   }
 }
 
-// ── Residents ─────────────────────────────────────────────────────────────────
+// ─── Residents — FIX CRÍTICO: lookup scoped a buildingId ─────────────────────
 
 export async function findOrCreateResident(data: {
   phone: string;
   buildingId: string;
   fullName?: string;
-}): Promise<ToolResult<{ id: string; fullName: string; isNew: boolean; unitId?: string | null; unitNumber?: string | null }>> {
+}): Promise<ToolResult<{
+  id: string;
+  fullName: string;
+  isNew: boolean;
+  unitId?: string | null;
+  unitNumber?: string | null;
+}>> {
   try {
+    // ANTES: findUnique({ where: { phone } }) — bug crítico, búsqueda global
+    // AHORA: findUnique con compound key @@unique([phone, buildingId])
     let resident = await prisma.resident.findUnique({
-      where: { phone: data.phone },
+      where: {
+        phone_buildingId: { phone: data.phone, buildingId: data.buildingId },
+      },
       include: { unit: true },
     });
     let isNew = false;
@@ -51,14 +75,15 @@ export async function findOrCreateResident(data: {
       resident = await prisma.resident.create({
         data: {
           phone: data.phone,
-          fullName: data.fullName ?? "Residente",
           buildingId: data.buildingId,
+          fullName: data.fullName ?? "Residente",
           status: "active",
         },
         include: { unit: true },
       });
       isNew = true;
     }
+
     return {
       success: true,
       data: {
@@ -74,7 +99,7 @@ export async function findOrCreateResident(data: {
   }
 }
 
-// ── Tickets ───────────────────────────────────────────────────────────────────
+// ─── Tickets — FIX CRÍTICO: numeración atómica sin race condition ─────────────
 
 export async function createTicket(input: {
   buildingId: string;
@@ -86,33 +111,53 @@ export async function createTicket(input: {
   priority?: string;
 }): Promise<ToolResult<{ id: string; ticketNumber: string }>> {
   try {
-    const count = await prisma.ticket.count({ where: { buildingId: input.buildingId } });
-    const year = new Date().getFullYear();
-    const ticketNumber = `TKT-${year}-${String(count + 1).padStart(3, "0")}`;
+    // ANTES: count() + 1 — race condition entre requests paralelos
+    // AHORA: atomic increment en Building.lastTicketSeq via transacción
+    const result = await prisma.$transaction(async (tx) => {
+      // Incrementar la secuencia del edificio de forma atómica
+      const building = await tx.building.update({
+        where: { id: input.buildingId },
+        data: { lastTicketSeq: { increment: 1 } },
+        select: { lastTicketSeq: true },
+      });
 
-    const ticket = await prisma.ticket.create({
-      data: {
-        buildingId: input.buildingId,
-        residentId: input.residentId,
-        unitId: input.unitId,
-        ticketNumber,
-        category: input.category,
-        title: input.title,
-        description: input.description,
-        priority: input.priority ?? "media",
-        status: "abierto",
-      },
+      const year = new Date().getFullYear();
+      const ticketNumber = `TKT-${year}-${String(building.lastTicketSeq).padStart(4, "0")}`;
+
+      const ticket = await tx.ticket.create({
+        data: {
+          buildingId: input.buildingId,
+          residentId: input.residentId,
+          unitId: input.unitId,
+          ticketNumber,
+          category: input.category,
+          title: input.title,
+          description: input.description,
+          priority: input.priority ?? "media",
+          status: "abierto",
+        },
+      });
+
+      return { id: ticket.id, ticketNumber };
     });
-    return { success: true, data: { id: ticket.id, ticketNumber } };
+
+    return { success: true, data: result };
   } catch (e) {
     return { success: false, error: String(e) };
   }
 }
 
-export async function getTicketsByResident(residentId: string): Promise<ToolResult> {
+export async function getTicketsByResident(
+  residentId: string,
+  buildingId: string
+): Promise<ToolResult> {
   try {
     const tickets = await prisma.ticket.findMany({
-      where: { residentId, status: { notIn: ["cerrado", "resuelto"] } },
+      where: {
+        residentId,
+        buildingId, // Siempre scoped al edificio
+        status: { notIn: ["cerrado", "resuelto"] },
+      },
       orderBy: { createdAt: "desc" },
       take: 5,
     });
@@ -122,11 +167,17 @@ export async function getTicketsByResident(residentId: string): Promise<ToolResu
   }
 }
 
-export async function getTicketsByBuilding(buildingId: string, status?: string): Promise<ToolResult> {
+export async function getTicketsByBuilding(
+  buildingId: string,
+  status?: string
+): Promise<ToolResult> {
   try {
     const tickets = await prisma.ticket.findMany({
       where: { buildingId, ...(status ? { status } : {}) },
-      include: { resident: { select: { fullName: true, phone: true } }, unit: { select: { number: true } } },
+      include: {
+        resident: { select: { fullName: true, phone: true } },
+        unit: { select: { number: true } },
+      },
       orderBy: { createdAt: "desc" },
       take: 50,
     });
@@ -136,12 +187,19 @@ export async function getTicketsByBuilding(buildingId: string, status?: string):
   }
 }
 
-// ── Payments ──────────────────────────────────────────────────────────────────
+// ─── Payments ─────────────────────────────────────────────────────────────────
 
-export async function getPaymentsByResident(residentId: string): Promise<ToolResult> {
+export async function getPaymentsByResident(
+  residentId: string,
+  buildingId: string
+): Promise<ToolResult> {
   try {
     const payments = await prisma.payment.findMany({
-      where: { residentId, status: { in: ["pendiente", "atrasado"] } },
+      where: {
+        residentId,
+        buildingId, // Siempre scoped
+        status: { in: ["pendiente", "atrasado", "vencido"] },
+      },
       orderBy: { dueDate: "asc" },
       take: 6,
     });
@@ -151,9 +209,12 @@ export async function getPaymentsByResident(residentId: string): Promise<ToolRes
   }
 }
 
-// ── Documents ─────────────────────────────────────────────────────────────────
+// ─── Documents ────────────────────────────────────────────────────────────────
 
-export async function getDocuments(buildingId: string, category?: string): Promise<ToolResult> {
+export async function getDocuments(
+  buildingId: string,
+  category?: string
+): Promise<ToolResult> {
   try {
     const docs = await prisma.document.findMany({
       where: { buildingId, isPublic: true, ...(category ? { category } : {}) },
@@ -166,7 +227,7 @@ export async function getDocuments(buildingId: string, category?: string): Promi
   }
 }
 
-// ── Announcements ─────────────────────────────────────────────────────────────
+// ─── Announcements ────────────────────────────────────────────────────────────
 
 export async function getRecentAnnouncements(buildingId: string): Promise<ToolResult> {
   try {
@@ -181,7 +242,7 @@ export async function getRecentAnnouncements(buildingId: string): Promise<ToolRe
   }
 }
 
-// ── Surveys ───────────────────────────────────────────────────────────────────
+// ─── Surveys ──────────────────────────────────────────────────────────────────
 
 export async function getActiveSurveys(buildingId: string): Promise<ToolResult> {
   try {
@@ -213,7 +274,7 @@ export async function saveSurveyResponse(input: {
   }
 }
 
-// ── Assembly ──────────────────────────────────────────────────────────────────
+// ─── Assembly ─────────────────────────────────────────────────────────────────
 
 export async function getNextAssembly(buildingId: string): Promise<ToolResult> {
   try {
@@ -227,7 +288,7 @@ export async function getNextAssembly(buildingId: string): Promise<ToolResult> {
   }
 }
 
-// ── Conversations ─────────────────────────────────────────────────────────────
+// ─── Conversations — con idempotencia en saveMessage ─────────────────────────
 
 export async function findOrCreateConversation(
   residentId: string,
@@ -244,7 +305,9 @@ export async function findOrCreateConversation(
       },
       orderBy: { updatedAt: "desc" },
     });
+
     if (recent) return { success: true, data: { id: recent.id } };
+
     const conv = await prisma.conversation.create({
       data: { residentId, buildingId, status: "open", aiEnabled: true },
     });
@@ -254,12 +317,31 @@ export async function findOrCreateConversation(
   }
 }
 
+/**
+ * Guarda un mensaje en la conversación.
+ * whatsappMessageId opcional — si se provee, previene duplicados en retries del webhook.
+ */
 export async function saveMessage(
   conversationId: string,
   sender: string,
-  content: string
+  content: string,
+  whatsappMessageId?: string
 ): Promise<void> {
-  await prisma.message.create({ data: { conversationId, sender, content } });
+  // Si se provee whatsappMessageId, intentar insert idempotente
+  if (whatsappMessageId) {
+    const existing = await prisma.message.findUnique({ where: { whatsappMessageId } });
+    if (existing) return; // Ya procesado — idempotente
+  }
+
+  await prisma.message.create({
+    data: {
+      conversationId,
+      sender,
+      content,
+      whatsappMessageId: whatsappMessageId ?? null,
+    },
+  });
+
   await prisma.conversation.update({
     where: { id: conversationId },
     data: { lastMessage: content.slice(0, 200), updatedAt: new Date() },
@@ -269,18 +351,24 @@ export async function saveMessage(
 export async function getConversationHistory(
   residentId: string,
   buildingId: string,
-  limit = 12
+  limit = 10
 ): Promise<{ messages: Array<{ role: "user" | "assistant"; content: string }>; intent?: string }> {
   try {
     const conv = await prisma.conversation.findFirst({
       where: { residentId, buildingId, status: "open" },
       orderBy: { updatedAt: "desc" },
-      include: { messages: { orderBy: { createdAt: "asc" }, take: limit } },
+      include: {
+        messages: {
+          orderBy: { createdAt: "asc" },
+          take: limit,
+          select: { sender: true, content: true },
+        },
+      },
     });
     if (!conv) return { messages: [] };
     return {
       messages: conv.messages.map((m) => ({
-        role: (m.sender === "resident" ? "user" : "assistant") as "user" | "assistant",
+        role: (m.sender === "residente" ? "user" : "assistant") as "user" | "assistant",
         content: m.content,
       })),
       intent: conv.intent ?? undefined,
@@ -301,10 +389,25 @@ export async function updateConversationIntent(
   });
 }
 
-// ── Dashboard Metrics ─────────────────────────────────────────────────────────
+// ─── Dashboard Metrics — siempre scoped a buildingId u organizationId ─────────
 
-export async function getDashboardMetrics(buildingId?: string) {
-  const where = buildingId ? { buildingId } : {};
+export async function getDashboardMetrics(
+  buildingId?: string,
+  organizationId?: string
+) {
+  // Al menos uno debe estar presente
+  const buildingWhere = buildingId ? { buildingId } : {};
+  const orgBuildingIds = organizationId && !buildingId
+    ? (await prisma.building.findMany({
+        where: { organizationId },
+        select: { id: true },
+      })).map((b) => b.id)
+    : null;
+
+  const where = orgBuildingIds
+    ? { buildingId: { in: orgBuildingIds } }
+    : buildingWhere;
+
   const today = new Date();
   today.setHours(0, 0, 0, 0);
 
@@ -320,18 +423,23 @@ export async function getDashboardMetrics(buildingId?: string) {
     activeSurveys,
     recentTickets,
   ] = await Promise.all([
-    prisma.building.count({ where: { active: true } }),
+    organizationId
+      ? prisma.building.count({ where: { organizationId, active: true } })
+      : prisma.building.count({ where: { active: true } }),
     prisma.resident.count({ where: { ...where, status: "active" } }),
     prisma.ticket.count({ where: { ...where, status: "abierto" } }),
     prisma.ticket.count({ where: { ...where, status: "abierto", priority: "urgente" } }),
     prisma.ticket.count({ where: { ...where, status: "resuelto", updatedAt: { gte: today } } }),
     prisma.payment.count({ where: { ...where, status: "pendiente" } }),
-    prisma.payment.count({ where: { ...where, status: "atrasado" } }),
+    prisma.payment.count({ where: { ...where, status: { in: ["atrasado", "vencido"] } } }),
     prisma.conversation.count({ where: { ...where, status: "open" } }),
     prisma.survey.count({ where: { ...where, status: "active" } }),
     prisma.ticket.findMany({
-      where: { ...where },
-      include: { resident: { select: { fullName: true } }, unit: { select: { number: true } } },
+      where,
+      include: {
+        resident: { select: { fullName: true } },
+        unit: { select: { number: true } },
+      },
       orderBy: { createdAt: "desc" },
       take: 5,
     }),

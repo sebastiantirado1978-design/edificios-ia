@@ -3,24 +3,98 @@ generator client {
 }
 
 datasource db {
-  provider = "sqlite"
-  url      = env("DATABASE_URL")
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// MULTITENANCY — Organización = empresa administradora de edificios (e.g. BlueHome)
+// ─────────────────────────────────────────────────────────────────────────────
+
+model Organization {
+  id        String  @id @default(cuid())
+  name      String
+  slug      String  @unique   // bluehome, administradora-xyz
+  rut       String?           // RUT empresa Chile
+  country   String  @default("CL")
+  timezone  String  @default("America/Santiago")
+
+  // Contacto
+  ownerName  String
+  ownerEmail String
+  ownerPhone String?
+  address    String?
+
+  // Plan y estado
+  plan          String  @default("starter")   // free | starter | pro | enterprise
+  status        String  @default("active")    // active | suspended | cancelled | trial
+  maxBuildings  Int     @default(3)           // Límite de edificios por plan
+  trialEndsAt   DateTime?
+
+  // Facturación
+  billingEmail         String?
+  stripeCustomerId     String?
+  stripeSubscriptionId String?
+  currentPeriodEnd     DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  users     User[]
+  buildings Building[]
+
+  @@index([slug])
+  @@index([status, plan])
+}
+
+model User {
+  id             String   @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  email          String   @unique
+  name           String
+  avatarUrl      String?
+  role           String   @default("admin")   // owner | admin | manager | viewer
+  lastLoginAt    DateTime?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@index([organizationId])
+  @@index([email])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// EDIFICIO — Unidad operativa. Cada edificio tiene su propio WhatsApp.
+// ─────────────────────────────────────────────────────────────────────────────
+
 model Building {
-  id              String   @id @default(cuid())
-  name            String
-  address         String
-  commune         String
-  city            String   @default("Santiago")
-  totalUnits      Int      @default(0)
-  whatsappPhoneId String?
-  whatsappToken   String?
-  adminPhone      String?
-  adminEmail      String?
-  active          Boolean  @default(true)
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
+  id             String  @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  name           String
+  address        String
+  commune        String
+  city           String  @default("Santiago")
+  totalUnits     Int     @default(0)
+  active         Boolean @default(true)
+
+  // WhatsApp Business — un número por edificio
+  whatsappPhoneId String?  // Meta phone_number_id — routing key del webhook
+  whatsappToken   String?  // Access token del edificio
+  waVerifyToken   String   @unique @default(cuid())
+  waConnected     Boolean  @default(false)
+
+  // Administración
+  adminPhone  String?
+  adminEmail  String?
+  adminName   String?
+
+  // Contadores para ticket numbering atómico
+  lastTicketSeq Int @default(0)   // CRÍTICO: secuencia atómica sin race condition
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   units         Unit[]
   residents     Resident[]
@@ -32,12 +106,20 @@ model Building {
   payments      Payment[]
   settings      BuildingSettings?
   conversations Conversation[]
+
+  @@index([organizationId])
+  @@index([organizationId, active])
+  @@index([whatsappPhoneId])   // CRÍTICO: lookup en cada mensaje entrante
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// UNIDADES Y RESIDENTES
+// ─────────────────────────────────────────────────────────────────────────────
 
 model Unit {
   id         String   @id @default(cuid())
   buildingId String
-  building   Building @relation(fields: [buildingId], references: [id])
+  building   Building @relation(fields: [buildingId], references: [id], onDelete: Cascade)
   number     String
   floor      Int?
   type       String   @default("departamento")
@@ -49,20 +131,29 @@ model Unit {
   residents Resident[]
   payments  Payment[]
   tickets   Ticket[]
+
+  @@index([buildingId])
+  @@index([buildingId, active])
 }
 
 model Resident {
-  id           String   @id @default(cuid())
-  buildingId   String
-  building     Building @relation(fields: [buildingId], references: [id])
-  unitId       String?
-  unit         Unit?    @relation(fields: [unitId], references: [id])
-  fullName     String
-  phone        String   @unique
-  email        String?
-  rut          String?
-  role         String   @default("residente")
-  status       String   @default("active")
+  id         String   @id @default(cuid())
+  buildingId String
+  building   Building @relation(fields: [buildingId], references: [id], onDelete: Cascade)
+  unitId     String?
+  unit       Unit?    @relation(fields: [unitId], references: [id])
+  fullName   String
+  phone      String
+  email      String?
+  rut        String?
+  role       String   @default("residente")   // residente | propietario | arrendatario | conserje
+  status     String   @default("active")      // active | inactive | expelled
+
+  // Compliance — Ley 19.628 / 21.719 Chile
+  consentGivenAt  DateTime?
+  consentVersion  String?
+  dataDeletedAt   DateTime?
+
   registeredAt DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
@@ -70,186 +161,272 @@ model Resident {
   tickets         Ticket[]
   surveyResponses SurveyResponse[]
   payments        Payment[]
+
+  // CRÍTICO: phone único por edificio, NO global
+  // Un residente puede vivir en distintos edificios con el mismo teléfono
+  @@unique([phone, buildingId])
+  @@index([buildingId])
+  @@index([buildingId, status])
+  @@index([phone])   // Para lookup rápido antes del join
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// TICKETS — Solicitudes y reclamos
+// ─────────────────────────────────────────────────────────────────────────────
+
 model Ticket {
-  id           String    @id @default(cuid())
+  id           String   @id @default(cuid())
   buildingId   String
-  building     Building  @relation(fields: [buildingId], references: [id])
+  building     Building @relation(fields: [buildingId], references: [id], onDelete: Cascade)
   residentId   String?
   resident     Resident? @relation(fields: [residentId], references: [id])
   unitId       String?
-  unit         Unit?     @relation(fields: [unitId], references: [id])
-  ticketNumber String
-  category     String
+  unit         Unit?    @relation(fields: [unitId], references: [id])
+  ticketNumber String   // TKT-2026-0042 — generado atómicamente via lastTicketSeq
+  category     String   // mantención | reclamo | solicitud | emergencia | información
   title        String
   description  String
-  priority     String    @default("media")
-  status       String    @default("abierto")
+  priority     String   @default("media")   // baja | media | alta | urgente
+  status       String   @default("abierto") // abierto | en_proceso | resuelto | cerrado
   assignedTo   String?
   resolvedAt   DateTime?
   notes        String?
-  createdAt    DateTime  @default(now())
-  updatedAt    DateTime  @updatedAt
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
 
   messages TicketMessage[]
+
+  @@unique([buildingId, ticketNumber])   // ticketNumber único por edificio
+  @@index([buildingId])
+  @@index([buildingId, status])
+  @@index([buildingId, priority, status])   // Dashboard: tickets urgentes abiertos
+  @@index([buildingId, createdAt])
+  @@index([residentId])
 }
 
 model TicketMessage {
   id        String   @id @default(cuid())
   ticketId  String
-  ticket    Ticket   @relation(fields: [ticketId], references: [id])
-  sender    String
+  ticket    Ticket   @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  sender    String   // residente | admin | sistema
   content   String
   createdAt DateTime @default(now())
+
+  @@index([ticketId, createdAt])
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// GASTOS COMUNES
+// ─────────────────────────────────────────────────────────────────────────────
+
 model Payment {
-  id         String    @id @default(cuid())
+  id         String   @id @default(cuid())
   buildingId String
-  building   Building  @relation(fields: [buildingId], references: [id])
+  building   Building @relation(fields: [buildingId], references: [id], onDelete: Cascade)
   residentId String?
   resident   Resident? @relation(fields: [residentId], references: [id])
   unitId     String?
-  unit       Unit?     @relation(fields: [unitId], references: [id])
-  period     String
+  unit       Unit?    @relation(fields: [unitId], references: [id])
+  period     String   // "2026-04"
   amount     Float
-  paidAmount Float     @default(0)
+  paidAmount Float    @default(0)
   dueDate    DateTime
   paidAt     DateTime?
-  status     String    @default("pendiente")
+  status     String   @default("pendiente")   // pendiente | pagado | vencido | condonado
   notes      String?
-  createdAt  DateTime  @default(now())
-  updatedAt  DateTime  @updatedAt
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([buildingId])
+  @@index([buildingId, status])
+  @@index([buildingId, period])
+  @@index([residentId])
+  @@index([dueDate, status])   // Job de cobro: busca vencimientos próximos
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DOCUMENTOS — Reglamentos, circulares, actas
+// ─────────────────────────────────────────────────────────────────────────────
 
 model Document {
   id         String   @id @default(cuid())
   buildingId String
-  building   Building @relation(fields: [buildingId], references: [id])
+  building   Building @relation(fields: [buildingId], references: [id], onDelete: Cascade)
   title      String
-  category   String
-  content    String
+  category   String   // reglamento | acta | circular | contrato | manual
+  content    String   // Texto completo para RAG
   fileUrl    String?
   isPublic   Boolean  @default(true)
   version    String?
-  createdAt  DateTime @default(now())
-  updatedAt  DateTime @updatedAt
+
+  // RAG — cuando se implemente pgvector
+  // embedding Unsupported("vector(1536)")?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([buildingId])
+  @@index([buildingId, category])
+  @@index([buildingId, isPublic])
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// COMUNICADOS Y ENCUESTAS
+// ─────────────────────────────────────────────────────────────────────────────
+
 model Announcement {
-  id          String    @id @default(cuid())
+  id          String   @id @default(cuid())
   buildingId  String
-  building    Building  @relation(fields: [buildingId], references: [id])
+  building    Building @relation(fields: [buildingId], references: [id], onDelete: Cascade)
   title       String
   content     String
-  targetRoles String    @default("todos")
-  sentViaWA   Boolean   @default(false)
+  targetRoles String   @default("todos")
+  sentViaWA   Boolean  @default(false)
   sentAt      DateTime?
-  createdAt   DateTime  @default(now())
+  createdAt   DateTime @default(now())
+
+  @@index([buildingId])
+  @@index([buildingId, createdAt])
 }
 
 model Survey {
-  id          String    @id @default(cuid())
+  id          String   @id @default(cuid())
   buildingId  String
-  building    Building  @relation(fields: [buildingId], references: [id])
+  building    Building @relation(fields: [buildingId], references: [id], onDelete: Cascade)
   title       String
   description String?
-  status      String    @default("draft")
+  status      String   @default("draft")   // draft | active | closed
   closesAt    DateTime?
-  createdAt   DateTime  @default(now())
+  createdAt   DateTime @default(now())
 
   questions SurveyQuestion[]
   responses SurveyResponse[]
+
+  @@index([buildingId, status])
 }
 
 model SurveyQuestion {
   id       String @id @default(cuid())
   surveyId String
-  survey   Survey @relation(fields: [surveyId], references: [id])
+  survey   Survey @relation(fields: [surveyId], references: [id], onDelete: Cascade)
   question String
-  type     String @default("single")
+  type     String @default("single")   // single | multiple | text | rating
   options  String @default("[]")
   order    Int    @default(0)
 
   answers SurveyResponse[]
+
+  @@index([surveyId])
 }
 
 model SurveyResponse {
-  id         String         @id @default(cuid())
+  id         String   @id @default(cuid())
   surveyId   String
-  survey     Survey         @relation(fields: [surveyId], references: [id])
+  survey     Survey   @relation(fields: [surveyId], references: [id], onDelete: Cascade)
   questionId String
-  question   SurveyQuestion @relation(fields: [questionId], references: [id])
+  question   SurveyQuestion @relation(fields: [questionId], references: [id], onDelete: Cascade)
   residentId String?
-  resident   Resident?      @relation(fields: [residentId], references: [id])
+  resident   Resident? @relation(fields: [residentId], references: [id])
   answer     String
-  createdAt  DateTime       @default(now())
+  createdAt  DateTime @default(now())
+
+  @@index([surveyId])
+  @@index([residentId])
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ASAMBLEAS DE COPROPIETARIOS
+// ─────────────────────────────────────────────────────────────────────────────
 
 model Assembly {
   id          String   @id @default(cuid())
   buildingId  String
-  building    Building @relation(fields: [buildingId], references: [id])
+  building    Building @relation(fields: [buildingId], references: [id], onDelete: Cascade)
   title       String
-  type        String   @default("ordinaria")
+  type        String   @default("ordinaria")   // ordinaria | extraordinaria | urgente
   scheduledAt DateTime
   location    String?
   quorum      Float?
-  status      String   @default("programada")
+  status      String   @default("programada")  // programada | realizada | cancelada
   agenda      String?
   minutesUrl  String?
   notes       String?
   createdAt   DateTime @default(now())
+
+  @@index([buildingId])
+  @@index([buildingId, scheduledAt])
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// CONVERSACIONES Y MENSAJES
+// ─────────────────────────────────────────────────────────────────────────────
+
 model Conversation {
-  id              String    @id @default(cuid())
+  id              String   @id @default(cuid())
   buildingId      String
-  building        Building  @relation(fields: [buildingId], references: [id])
+  building        Building @relation(fields: [buildingId], references: [id], onDelete: Cascade)
   residentId      String?
   resident        Resident? @relation(fields: [residentId], references: [id])
-  channel         String    @default("whatsapp")
+  channel         String   @default("whatsapp")
   lastMessage     String?
   intent          String?
-  status          String    @default("open")
-  assignedToHuman Boolean   @default(false)
-  aiEnabled       Boolean   @default(true)
-  createdAt       DateTime  @default(now())
-  updatedAt       DateTime  @updatedAt
+  status          String   @default("open")   // open | closed | awaiting_consent | consent_rejected
+  assignedToHuman Boolean  @default(false)
+  aiEnabled       Boolean  @default(true)
+  handoffReason   String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
 
   messages Message[]
+
+  @@index([buildingId, status])
+  @@index([buildingId, status, updatedAt])   // Feed de conversaciones activas
+  @@index([residentId])
+  @@index([buildingId, residentId])
 }
 
 model Message {
-  id             String       @id @default(cuid())
-  conversationId String
-  conversation   Conversation @relation(fields: [conversationId], references: [id])
-  sender         String
-  content        String
-  createdAt      DateTime     @default(now())
+  id                String   @id @default(cuid())
+  conversationId    String
+  conversation      Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  sender            String   // residente | agente | humano | sistema
+  content           String
+  whatsappMessageId String?  // ID de Meta — garantiza idempotencia en retries
+  createdAt         DateTime @default(now())
+
+  @@unique([whatsappMessageId])   // Previene duplicados en reintentos del webhook
+  @@index([conversationId, createdAt])
+  @@index([whatsappMessageId])
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// CONFIGURACIÓN DEL AGENTE POR EDIFICIO
+// ─────────────────────────────────────────────────────────────────────────────
+
 model BuildingSettings {
-  id                String   @id @default(cuid())
-  buildingId        String   @unique
-  building          Building @relation(fields: [buildingId], references: [id])
-  welcomeMessage    String   @default("Hola, soy el asistente virtual de tu edificio. ¿En qué te puedo ayudar?")
-  outOfHoursMessage String   @default("Estamos fuera de horario. Te responderemos pronto.")
-  officeHoursStart  String   @default("09:00")
-  officeHoursEnd    String   @default("18:00")
-  emergencyPhone    String?
-  conciergePhone    String?
-  commonAreasInfo   String?
-  parkingRules      String?
-  petPolicy         String?
-  noisePolicy       String?
-  guestPolicy       String?
-  paymentInfo       String?
-  gastosComunesDueDay Int     @default(5)
-  reglamento          String  @default("")
-  officeHours         String  @default("Lunes a Viernes 09:00-18:00")
-  cancellationPolicy  String  @default("")
-  createdAt         DateTime @default(now())
-  updatedAt         DateTime @updatedAt
+  id                  String   @id @default(cuid())
+  buildingId          String   @unique
+  building            Building @relation(fields: [buildingId], references: [id], onDelete: Cascade)
+  welcomeMessage      String   @default("Hola, soy el asistente virtual de tu edificio. ¿En qué te puedo ayudar?")
+  outOfHoursMessage   String   @default("Estamos fuera de horario. Te responderemos pronto.")
+  officeHours         String   @default("Lunes a Viernes 09:00-18:00")
+  officeHoursStart    String   @default("09:00")
+  officeHoursEnd      String   @default("18:00")
+  emergencyPhone      String?
+  conciergePhone      String?
+  commonAreasInfo     String?
+  parkingRules        String?
+  petPolicy           String?
+  noisePolicy         String?
+  guestPolicy         String?
+  paymentInfo         String?
+  gastosComunesDueDay Int      @default(5)
+  reglamento          String   @default("")
+  cancellationPolicy  String   @default("")
+  aiEnabled           Boolean  @default(true)
+  autoHandoff         Boolean  @default(true)
+  address             String?
+  commune             String?
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
 }

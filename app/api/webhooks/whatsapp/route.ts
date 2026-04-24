@@ -311,7 +311,7 @@ async function executeAgentTool(
       return `TICKET_CREADO:${(result.data as any).ticketNumber}`;
     }
     case "get_my_tickets": {
-      const result = await getTicketsByResident(context.residentId);
+      const result = await getTicketsByResident(context.residentId, context.buildingId);
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const tickets = (result.data as any[]) ?? [];
       if (tickets.length === 0) return "No tienes tickets abiertos actualmente.";
@@ -319,7 +319,7 @@ async function executeAgentTool(
       return tickets.map((t: any) => `${t.ticketNumber}: ${t.title} (${t.status})`).join("\n");
     }
     case "get_my_payments": {
-      const result = await getPaymentsByResident(context.residentId);
+      const result = await getPaymentsByResident(context.residentId, context.buildingId);
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const payments = (result.data as any[]) ?? [];
       if (payments.length === 0) return "No tienes pagos pendientes. Estas al dia.";
